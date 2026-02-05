@@ -1,5 +1,6 @@
 package ma.scraper
 
+import android.Manifest
 import android.content.*
 import android.net.Uri
 import android.os.Build
@@ -14,7 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -25,6 +27,7 @@ import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import ma.scraper.model.Car
 import ma.scraper.ws.WsForegroundService
+import java.text.NumberFormat
 
 class MainActivity : ComponentActivity() {
 
@@ -53,7 +56,7 @@ class MainActivity : ComponentActivity() {
     private fun startWsService() {
         val i = Intent(this, WsForegroundService::class.java)
         ContextCompat.startForegroundService(this, i)
-        bindService(i, conn, Context.BIND_AUTO_CREATE)
+        bindService(i, conn, BIND_AUTO_CREATE)
     }
 
     private val notifPerm = registerForActivityResult(
@@ -68,7 +71,7 @@ class MainActivity : ComponentActivity() {
 
         // Android 13+ Permission (optional – Service läuft auch ohne, nur Notifs ggf. stumm)
         if (Build.VERSION.SDK_INT >= 33) {
-            notifPerm.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             startWsService()
         }
@@ -146,7 +149,8 @@ private fun CarRow(
                 .fillMaxWidth()
                 .padding(12.dp)
         ) {
-            // Bild (URL aus car.image)
+
+            // Bild links
             AsyncImage(
                 model = car.image,
                 contentDescription = car.title,
@@ -160,6 +164,7 @@ private fun CarRow(
             Spacer(Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
+
                 // Titel
                 Text(
                     text = car.title,
@@ -169,40 +174,50 @@ private fun CarRow(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
 
-                // Preis + Ort klar getrennt
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = car.priceEur?.let { "$it €" } ?: "Preis auf Anfrage",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
+                // Preis fett
+                Text(
+                    text = car.priceEur?.let { "${formatNumber(it)} €" } ?: "Preis auf Anfrage",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
 
+                Spacer(Modifier.height(4.dp))
+
+                // Ort + Jahr
+                val placeYear = listOfNotNull(
+                    car.location,
+                    car.year?.let { "EZ $it" }
+                ).joinToString(" · ")
+
+                if (placeYear.isNotBlank()) {
                     Text(
-                        text = car.location ?: "",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = placeYear,
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
 
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(4.dp))
 
-                // Attribute-Zeile (Platzhalter, später erweiterbar)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!car.location.isNullOrBlank()) {
-                        AssistChip(onClick = {}, label = { Text("Ort") })
-                    }
-                    if (car.priceEur != null) {
-                        AssistChip(onClick = {}, label = { Text("Preis") })
-                    }
-                    AssistChip(onClick = {}, label = { Text("Link") })
+                // KM · PS · Getriebe · Kraftstoff
+                val facts = listOfNotNull(
+                    car.km?.let { "${formatNumber(it)} km" },
+                    car.ps?.let { "$it PS" },
+                    car.transmission,
+                    car.fuel
+                ).joinToString(" · ")
+
+                if (facts.isNotBlank()) {
+                    Text(
+                        text = facts,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
     }
 }
+
+private fun formatNumber(n: Int): String =
+    NumberFormat.getIntegerInstance().format(n)
