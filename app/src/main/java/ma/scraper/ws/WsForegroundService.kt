@@ -36,14 +36,14 @@ class WsForegroundService : Service() {
         const val NEW_CARS_NOTIF_ID = 2
 
         // Emulator: ws://10.0.2.2:3000/ws
-        // Handy im WLAN: ws://<PC_IP>:3000/ws
+        // Handy: ws://<PC_IP>:3000/ws
         const val WS_URL = "ws://195.201.127.202:3000/ws"
     }
 
     private val gson = Gson()
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // RAM store
+    // RAM store (dedup)
     private val byId = ConcurrentHashMap<String, Car>()
     private val ordered = CopyOnWriteArrayList<Car>() // newest-first
 
@@ -78,7 +78,6 @@ class WsForegroundService : Service() {
 
         initSound()
 
-        // Foreground Service sofort (sonst Android 12+ Stress)
         startForeground(NOTIF_ID, persistentNotif("Starte…"))
         connect()
     }
@@ -108,7 +107,6 @@ class WsForegroundService : Service() {
             .setAudioAttributes(attrs)
             .build()
 
-        // Lege res/raw/ping.mp3 an
         pingId = soundPool!!.load(this, R.raw.hupe, 1)
     }
 
@@ -130,21 +128,15 @@ class WsForegroundService : Service() {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 scope.launch {
-                    val incoming = parseCars(text)
-                    if (incoming == null) {
-                        Log.w(TAG, "parseCars() null")
-                        return@launch
-                    }
+                    val incoming = parseCars(text) ?: return@launch
 
                     val added = mergeIncoming(incoming)
                     if (added > 0) {
                         notifyUi()
 
                         if (AppVisibility.isForeground) {
-                            // 🔔 Ping im Vordergrund
                             soundPool?.play(pingId, 1f, 1f, 0, 0, 1f)
                         } else {
-                            // 📣 Notification im Hintergrund
                             showNewCarsNotif(added)
                         }
 
@@ -183,9 +175,15 @@ class WsForegroundService : Service() {
         }
     }
 
-    // dedup by id, newest-first
+    /**
+     * - dedup by id
+     * - newest-first
+     * - HARD CAP: max 200
+     *   wenn >200 => untere 100 löschen
+     */
     private fun mergeIncoming(incoming: List<Car>): Int {
         var added = 0
+
         for (car in incoming) {
             val existed = byId.putIfAbsent(car.id, car)
             if (existed == null) {
@@ -193,10 +191,19 @@ class WsForegroundService : Service() {
                 added++
             }
         }
+
+        // HARD CAP: nie größer als 200
+        if (ordered.size > 200) {
+            val removeCount = min(100, ordered.size)
+            repeat(removeCount) {
+                val last = ordered.removeAt(ordered.size - 1)
+                byId.remove(last.id)
+            }
+        }
+
         return added
     }
 
-    // Listener immer auf Main Thread
     private fun notifyUi() {
         val snap = currentList()
         mainHandler.post {

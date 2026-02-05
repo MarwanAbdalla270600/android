@@ -8,24 +8,27 @@ import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
 import ma.scraper.model.Car
 import ma.scraper.ws.WsForegroundService
 import java.text.NumberFormat
@@ -98,6 +101,41 @@ private fun WillhabenListScreen(
     cars: List<Car>,
     onOpen: (String) -> Unit
 ) {
+    val listState = rememberLazyListState()
+
+    // IDs die 5 Sekunden gelb sein sollen
+    val highlighted = remember { mutableStateMapOf<String, Boolean>() }
+
+    // Vorherige IDs merken, um neue zu erkennen
+    val prevIds = remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // Update: neue IDs oben erkennen -> highlight + scrollTop
+    LaunchedEffect(cars) {
+        if (cars.isEmpty()) return@LaunchedEffect
+
+        // Neue kommen bei dir vorne rein -> wir prüfen nur die Top 30
+        val currentTopIds = cars.take(30).map { it.id }
+        val old = prevIds.value
+
+        val newIds = currentTopIds.filter { it !in old }
+
+        // Nicht beim allerersten Laden scrollen
+        if (newIds.isNotEmpty() && old.isNotEmpty()) {
+            // Auto-Scroll nach oben
+            listState.animateScrollToItem(0)
+
+            // Alle neuen gelb markieren
+            for (id in newIds) highlighted[id] = true
+
+            // 5 Sekunden warten, dann Markierung entfernen
+            delay(5000)
+            for (id in newIds) highlighted.remove(id)
+        }
+
+        // prevIds updaten (mehr als 300 brauchst du nicht)
+        prevIds.value = cars.take(300).map { it.id }.toSet()
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -114,18 +152,20 @@ private fun WillhabenListScreen(
             style = MaterialTheme.typography.bodyMedium
         )
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(
-                top = 8.dp,      // 👈 Abstand zur oberen Kante
-                bottom = 12.dp
-            )
-        ){
+            contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp)
+        ) {
             items(cars, key = { it.id }) { car ->
-                WillhabenRowCard(car = car, onOpen = onOpen)
+                WillhabenRowCard(
+                    car = car,
+                    onOpen = onOpen,
+                    highlight = highlighted[car.id] == true
+                )
             }
         }
     }
@@ -134,12 +174,25 @@ private fun WillhabenListScreen(
 @Composable
 private fun WillhabenRowCard(
     car: Car,
-    onOpen: (String) -> Unit
+    onOpen: (String) -> Unit,
+    highlight: Boolean
 ) {
+    // Crash-Fix: niemals riesige Strings direkt rendern
+    val title = safeText(car.title, 120)
+    val location = safeText(car.location, 60)
+    val fuel = safeText(car.fuel, 30)
+    val transmission = safeText(car.transmission, 30)
+
+    val bg by animateColorAsState(
+        targetValue = if (highlight) Color(0xFFFFF3B0) else MaterialTheme.colorScheme.surface,
+        label = "new-highlight"
+    )
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.cardColors(containerColor = bg)
     ) {
         Row(
             modifier = Modifier
@@ -148,10 +201,10 @@ private fun WillhabenRowCard(
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // FOTO LINKS (klein, wie Willhaben)
+            // Foto links
             AsyncImage(
                 model = car.image,
-                contentDescription = car.title,
+                contentDescription = title,
                 modifier = Modifier
                     .size(width = 96.dp, height = 72.dp)
                     .clip(RoundedCornerShape(8.dp))
@@ -161,12 +214,11 @@ private fun WillhabenRowCard(
 
             Spacer(Modifier.width(10.dp))
 
-            // INFOS RECHTS
+            // Infos rechts
             Column(modifier = Modifier.weight(1f)) {
 
-                // Titel
                 Text(
-                    text = car.title,
+                    text = title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 2,
@@ -175,27 +227,33 @@ private fun WillhabenRowCard(
 
                 Spacer(Modifier.height(4.dp))
 
-                // Specs-Zeile: EZ | KM | PS
-                val spec = listOfNotNull(
-                    car.year?.let { "${it} EZ" },
-                    car.km?.let { "${formatNumber(it)} km" },
-                    car.ps?.let { "${it} PS" }
-                ).joinToString(" | ")
+                // Specs: EZ | km | PS | Getriebe | Fuel
+                val spec = safeText(
+                    listOfNotNull(
+                        car.year?.let { "${it} EZ" },
+                        car.km?.let { "${formatNumber(it)} km" },
+                        car.ps?.let { "${it} PS" },
+                        transmission.takeIf { it.isNotBlank() },
+                        fuel.takeIf { it.isNotBlank() }
+                    ).joinToString(" | "),
+                    160
+                )
 
                 if (spec.isNotBlank()) {
                     Text(
                         text = spec,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 Spacer(Modifier.height(2.dp))
 
-                // Ort
-                if (!car.location.isNullOrBlank()) {
+                if (location.isNotBlank()) {
                     Text(
-                        text = car.location!!,
+                        text = location,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -206,15 +264,28 @@ private fun WillhabenRowCard(
 
             Spacer(Modifier.width(8.dp))
 
-            // PREIS RECHTS
+            val priceText = safeText(
+                car.priceEur?.let { "€ ${formatNumber(it)}" } ?: "Preis a.A.",
+                30
+            )
+
             Text(
-                text = car.priceEur?.let { "€ ${formatNumber(it)}" } ?: "Preis a.A.",
+                text = priceText,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
         }
     }
+}
+
+private fun safeText(s: String?, max: Int): String {
+    if (s == null) return ""
+    // Kontrollzeichen raus, trimmen, hart begrenzen
+    val cleaned = s
+        .replace(Regex("[\\u0000-\\u001F\\u007F]"), " ")
+        .trim()
+    return if (cleaned.length <= max) cleaned else cleaned.take(max) + "…"
 }
 
 private fun formatNumber(n: Int): String =
