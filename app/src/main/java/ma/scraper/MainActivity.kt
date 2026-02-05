@@ -9,8 +9,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,10 +29,27 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.google.gson.Gson
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ma.scraper.model.Car
 import ma.scraper.ws.WsForegroundService
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.NumberFormat
+
+private const val BASE_URL = "http://195.201.127.202:3000"
+
+private val JSON = "application/json; charset=utf-8".toMediaType()
+
+data class ContactInfo(
+    val name: String? = null,
+    val address: String? = null
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -82,6 +100,14 @@ class MainActivity : ComponentActivity() {
                         cars = carsState.value,
                         onOpen = { url ->
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        },
+                        onDial = { number ->
+                            // ACTION_DIAL -> keine Permission nötig
+                            startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")))
+                        },
+                        onGoogle = { query ->
+                            val url = "https://www.google.com/search?q=" + Uri.encode(query)
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         }
                     )
                 }
@@ -99,85 +125,222 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun WillhabenListScreen(
     cars: List<Car>,
-    onOpen: (String) -> Unit
+    onOpen: (String) -> Unit,
+    onDial: (String) -> Unit,
+    onGoogle: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
 
-    // IDs die 5 Sekunden gelb sein sollen
+    // Highlight 5 Sekunden
     val highlighted = remember { mutableStateMapOf<String, Boolean>() }
-
-    // Vorherige IDs merken, um neue zu erkennen
     val prevIds = remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    // Update: neue IDs oben erkennen -> highlight + scrollTop
+    // Snackbar dezent
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    // Dialog state
+    var showDialog by remember { mutableStateOf(false) }
+    var selectedCar by remember { mutableStateOf<Car?>(null) }
+    var loadingCall by remember { mutableStateOf(false) }
+    var loadingGoogle by remember { mutableStateOf(false) }
+
+    // Networking (singletons in composable ok, werden remembered)
+    val gson = remember { Gson() }
+    val client = remember { OkHttpClient.Builder().build() }
+
+    suspend fun postJson(endpoint: String, payload: String): Pair<Int, String> =
+        withContext(Dispatchers.IO) {
+            val body = payload.toRequestBody(JSON)
+            val req = Request.Builder()
+                .url(BASE_URL + endpoint)
+                .post(body)
+                .build()
+
+            client.newCall(req).execute().use { res ->
+                res.code to (res.body?.string().orEmpty())
+            }
+        }
+
+    suspend fun fetchTel(url: String): String? = runCatching {
+        val (code, body) = postJson("/api/data/tel", """{"data":"${escapeJson(url)}"}""")
+        if (code == 404) return null
+        if (code !in 200..299) return null
+
+        // Erwartet JSON string: "+4366..."
+        gson.fromJson(body, String::class.java)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    suspend fun fetchContact(url: String): ContactInfo? = runCatching {
+        val (code, body) = postJson("/api/data/contactInfo", """{"data":"${escapeJson(url)}"}""")
+        if (code == 404) return null
+        if (code !in 200..299) return null
+
+        gson.fromJson(body, ContactInfo::class.java)
+    }.getOrNull()
+
+    // neue Anzeigen erkennen -> scroll + highlight
     LaunchedEffect(cars) {
         if (cars.isEmpty()) return@LaunchedEffect
-
-        // Neue kommen bei dir vorne rein -> wir prüfen nur die Top 30
         val currentTopIds = cars.take(30).map { it.id }
         val old = prevIds.value
-
         val newIds = currentTopIds.filter { it !in old }
 
-        // Nicht beim allerersten Laden scrollen
         if (newIds.isNotEmpty() && old.isNotEmpty()) {
-            // Auto-Scroll nach oben
             listState.animateScrollToItem(0)
-
-            // Alle neuen gelb markieren
             for (id in newIds) highlighted[id] = true
-
-            // 5 Sekunden warten, dann Markierung entfernen
             delay(5000)
             for (id in newIds) highlighted.remove(id)
         }
 
-        // prevIds updaten (mehr als 300 brauchst du nicht)
         prevIds.value = cars.take(300).map { it.id }.toSet()
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        Text(
-            text = "WillhabenScraper",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "${cars.size} Anzeigen",
-            style = MaterialTheme.typography.bodyMedium
-        )
-
-        Spacer(Modifier.height(12.dp))
-
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp)
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp, vertical = 8.dp)
         ) {
-            items(cars, key = { it.id }) { car ->
-                WillhabenRowCard(
-                    car = car,
-                    onOpen = onOpen,
-                    highlight = highlighted[car.id] == true
-                )
+            Text(
+                text = "${cars.size} Anzeigen",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp)
+            ) {
+                items(cars, key = { it.id }) { car ->
+                    WillhabenRowCard(
+                        car = car,
+                        highlight = highlighted[car.id] == true,
+                        onClick = { onOpen(car.url) },
+                        onLongClick = {
+                            selectedCar = car
+                            showDialog = true
+                        }
+                    )
+                }
             }
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+
+    if (showDialog && selectedCar != null) {
+        val car = selectedCar!!
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!loadingCall && !loadingGoogle) {
+                    showDialog = false
+                    selectedCar = null
+                }
+            },
+            title = { Text("Aktion") },
+            text = {
+                Text(
+                    text = safeText(car.title, 120),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                loadingCall = true
+                                val tel = fetchTel(car.url)
+                                loadingCall = false
+
+                                if (tel == null) {
+                                    snackbarHostState.showSnackbar("Keine Nummer gefunden.")
+                                } else {
+                                    onDial(tel) // Main thread OK
+                                    showDialog = false
+                                    selectedCar = null
+                                }
+                            }
+                        },
+                        enabled = !loadingCall && !loadingGoogle
+                    ) {
+                        if (loadingCall) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("Anrufen")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                loadingGoogle = true
+                                val info = fetchContact(car.url)
+                                loadingGoogle = false
+
+                                val name = info?.name?.trim().orEmpty()
+                                val address = info?.address?.trim().orEmpty()
+
+                                // ✅ wenn eins von beiden fehlt -> Fehler (wie du wolltest)
+                                if (name.isBlank() || address.isBlank()) {
+                                    snackbarHostState.showSnackbar("Kontaktinfo unvollständig.")
+                                } else {
+                                    onGoogle("$name $address")
+                                    showDialog = false
+                                    selectedCar = null
+                                }
+                            }
+                        },
+                        enabled = !loadingCall && !loadingGoogle
+                    ) {
+                        if (loadingGoogle) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("Googeln")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        if (!loadingCall && !loadingGoogle) {
+                            showDialog = false
+                            selectedCar = null
+                        }
+                    }
+                ) { Text("Abbrechen") }
+            }
+        )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WillhabenRowCard(
     car: Car,
-    onOpen: (String) -> Unit,
-    highlight: Boolean
+    highlight: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
-    // Crash-Fix: niemals riesige Strings direkt rendern
     val title = safeText(car.title, 120)
     val location = safeText(car.location, 60)
     val fuel = safeText(car.fuel, 30)
@@ -197,11 +360,10 @@ private fun WillhabenRowCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onOpen(car.url) }
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Foto links
             AsyncImage(
                 model = car.image,
                 contentDescription = title,
@@ -214,9 +376,7 @@ private fun WillhabenRowCard(
 
             Spacer(Modifier.width(10.dp))
 
-            // Infos rechts
             Column(modifier = Modifier.weight(1f)) {
-
                 Text(
                     text = title,
                     style = MaterialTheme.typography.titleSmall,
@@ -227,7 +387,6 @@ private fun WillhabenRowCard(
 
                 Spacer(Modifier.height(4.dp))
 
-                // Specs: EZ | km | PS | Getriebe | Fuel
                 val spec = safeText(
                     listOfNotNull(
                         car.year?.let { "${it} EZ" },
@@ -281,12 +440,12 @@ private fun WillhabenRowCard(
 
 private fun safeText(s: String?, max: Int): String {
     if (s == null) return ""
-    // Kontrollzeichen raus, trimmen, hart begrenzen
-    val cleaned = s
-        .replace(Regex("[\\u0000-\\u001F\\u007F]"), " ")
-        .trim()
+    val cleaned = s.replace(Regex("[\\u0000-\\u001F\\u007F]"), " ").trim()
     return if (cleaned.length <= max) cleaned else cleaned.take(max) + "…"
 }
 
 private fun formatNumber(n: Int): String =
     NumberFormat.getIntegerInstance().format(n)
+
+private fun escapeJson(s: String): String =
+    s.replace("\\", "\\\\").replace("\"", "\\\"")
