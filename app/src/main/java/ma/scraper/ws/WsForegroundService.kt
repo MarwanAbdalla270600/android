@@ -2,6 +2,8 @@ package ma.scraper.ws
 
 import android.app.*
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.SoundPool
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -52,11 +54,15 @@ class WsForegroundService : Service() {
 
     private val client = OkHttpClient.Builder()
         .pingInterval(25, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // WS: "unendlich"
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     private var ws: WebSocket? = null
     private var reconnectAttempt = 0
+
+    // 🔔 Sound
+    private var soundPool: SoundPool? = null
+    private var pingId: Int = 0
 
     inner class LocalBinder : Binder() {
         fun getService(): WsForegroundService = this@WsForegroundService
@@ -69,6 +75,8 @@ class WsForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             createChannels()
         }
+
+        initSound()
 
         // Foreground Service sofort (sonst Android 12+ Stress)
         startForeground(NOTIF_ID, persistentNotif("Starte…"))
@@ -89,55 +97,60 @@ class WsForegroundService : Service() {
 
     fun currentList(): List<Car> = ordered.toList()
 
+    private fun initSound() {
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+
+        soundPool = SoundPool.Builder()
+            .setMaxStreams(1)
+            .setAudioAttributes(attrs)
+            .build()
+
+        // Lege res/raw/ping.mp3 an
+        pingId = soundPool!!.load(this, R.raw.hupe, 1)
+    }
+
     private fun connect() {
-        // Alte Verbindung hart killen, bevor wir neu verbinden
         try { ws?.cancel() } catch (_: Throwable) {}
         ws = null
 
         Log.i(TAG, "Connecting to: $WS_URL")
 
-        val req = Request.Builder()
-            .url(WS_URL)
-            .build()
+        val req = Request.Builder().url(WS_URL).build()
 
         ws = client.newWebSocket(req, object : WebSocketListener() {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "CONNECTED ✅ code=${response.code} msg=${response.message}")
+                Log.i(TAG, "CONNECTED ✅ code=${response.code}")
                 reconnectAttempt = 0
                 updatePersistentNotif("Verbunden ✅")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                // Debug: falls du sehen willst, was reinkommt
-                // Log.d(TAG, "MSG: $text")
-
                 scope.launch {
                     val incoming = parseCars(text)
                     if (incoming == null) {
-                        Log.w(TAG, "parseCars() returned null (Message war kein List<Car>)")
+                        Log.w(TAG, "parseCars() null")
                         return@launch
                     }
 
                     val added = mergeIncoming(incoming)
-
                     if (added > 0) {
                         notifyUi()
-                        if (!AppVisibility.isForeground) {
+
+                        if (AppVisibility.isForeground) {
+                            // 🔔 Ping im Vordergrund
+                            soundPool?.play(pingId, 1f, 1f, 0, 0, 1f)
+                        } else {
+                            // 📣 Notification im Hintergrund
                             showNewCarsNotif(added)
                         }
+
                         updatePersistentNotif("Verbunden ✅ ($added neu)")
-                    } else {
-                        // optional: “alive”-Status
-                        // updatePersistentNotif("Verbunden ✅")
                     }
                 }
-            }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.w(TAG, "CLOSING code=$code reason=$reason")
-                updatePersistentNotif("Trenne…")
-                webSocket.close(code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -147,10 +160,7 @@ class WsForegroundService : Service() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "FAIL ❌ ${t.javaClass.simpleName}: ${t.message}", t)
-                if (response != null) {
-                    Log.e(TAG, "HTTP response: ${response.code} ${response.message}")
-                }
+                Log.e(TAG, "FAIL ❌ ${t.message}", t)
                 updatePersistentNotif("Verbindung fehlgeschlagen ❌")
                 scheduleReconnect("failure: ${t.message}")
             }
@@ -201,6 +211,8 @@ class WsForegroundService : Service() {
 
     override fun onDestroy() {
         try { ws?.close(1000, "service destroyed") } catch (_: Throwable) {}
+        soundPool?.release()
+        soundPool = null
         scope.cancel()
         super.onDestroy()
     }
@@ -212,8 +224,12 @@ class WsForegroundService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "WillhabenScraper", NotificationManager.IMPORTANCE_LOW)
         )
+
         nm.createNotificationChannel(
-            NotificationChannel(NEW_CARS_CHANNEL_ID, "Neue Autos", NotificationManager.IMPORTANCE_DEFAULT)
+            NotificationChannel(NEW_CARS_CHANNEL_ID, "Neue Autos", NotificationManager.IMPORTANCE_HIGH).apply {
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 150, 80, 150)
+            }
         )
     }
 
@@ -223,8 +239,13 @@ class WsForegroundService : Service() {
     }
 
     private fun persistentNotif(text: String): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -236,8 +257,13 @@ class WsForegroundService : Service() {
     }
 
     private fun showNewCarsNotif(count: Int) {
-        val intent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val notif = NotificationCompat.Builder(this, NEW_CARS_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)

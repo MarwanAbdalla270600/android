@@ -1,6 +1,5 @@
 package ma.scraper
 
-import android.Manifest
 import android.content.*
 import android.net.Uri
 import android.os.Build
@@ -10,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -32,11 +33,8 @@ import java.text.NumberFormat
 class MainActivity : ComponentActivity() {
 
     private var service: WsForegroundService? = null
-
-    // Compose state
     private val carsState = mutableStateOf<List<Car>>(emptyList())
 
-    // Listener wird vom Service immer auf Main Thread aufgerufen
     private val listener: (List<Car>) -> Unit = { list ->
         carsState.value = list
     }
@@ -56,22 +54,20 @@ class MainActivity : ComponentActivity() {
     private fun startWsService() {
         val i = Intent(this, WsForegroundService::class.java)
         ContextCompat.startForegroundService(this, i)
-        bindService(i, conn, BIND_AUTO_CREATE)
+        bindService(i, conn, Context.BIND_AUTO_CREATE)
     }
 
     private val notifPerm = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        // egal ob erlaubt oder nicht: Service starten
         startWsService()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Android 13+ Permission (optional – Service läuft auch ohne, nur Notifs ggf. stumm)
         if (Build.VERSION.SDK_INT >= 33) {
-            notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
+            notifPerm.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         } else {
             startWsService()
         }
@@ -79,7 +75,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    CarListScreen(
+                    WillhabenListScreen(
                         cars = carsState.value,
                         onOpen = { url ->
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -98,14 +94,14 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CarListScreen(
+private fun WillhabenListScreen(
     cars: List<Car>,
     onOpen: (String) -> Unit
 ) {
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Text(
             text = "WillhabenScraper",
@@ -113,108 +109,110 @@ private fun CarListScreen(
             fontWeight = FontWeight.SemiBold
         )
         Spacer(Modifier.height(6.dp))
-
         Text(
-            text = "Neue Autos: ${cars.size}",
+            text = "${cars.size} Anzeigen",
             style = MaterialTheme.typography.bodyMedium
         )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            contentPadding = PaddingValues(bottom = 12.dp)
-        ) {
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(
+                top = 8.dp,      // 👈 Abstand zur oberen Kante
+                bottom = 12.dp
+            )
+        ){
             items(cars, key = { it.id }) { car ->
-                CarRow(car = car, onOpen = onOpen)
+                WillhabenRowCard(car = car, onOpen = onOpen)
             }
         }
     }
 }
 
 @Composable
-private fun CarRow(
+private fun WillhabenRowCard(
     car: Car,
     onOpen: (String) -> Unit
 ) {
     Card(
-        onClick = { onOpen(car.url) },
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp)
+                .clickable { onOpen(car.url) }
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-
-            // Bild links
+            // FOTO LINKS (klein, wie Willhaben)
             AsyncImage(
                 model = car.image,
                 contentDescription = car.title,
                 modifier = Modifier
-                    .size(width = 110.dp, height = 86.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .size(width = 96.dp, height = 72.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentScale = ContentScale.Crop
             )
 
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(10.dp))
 
+            // INFOS RECHTS
             Column(modifier = Modifier.weight(1f)) {
 
                 // Titel
                 Text(
                     text = car.title,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Spacer(Modifier.height(6.dp))
-
-                // Preis fett
-                Text(
-                    text = car.priceEur?.let { "${formatNumber(it)} €" } ?: "Preis auf Anfrage",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-
                 Spacer(Modifier.height(4.dp))
 
-                // Ort + Jahr
-                val placeYear = listOfNotNull(
-                    car.location,
-                    car.year?.let { "EZ $it" }
-                ).joinToString(" · ")
+                // Specs-Zeile: EZ | KM | PS
+                val spec = listOfNotNull(
+                    car.year?.let { "${it} EZ" },
+                    car.km?.let { "${formatNumber(it)} km" },
+                    car.ps?.let { "${it} PS" }
+                ).joinToString(" | ")
 
-                if (placeYear.isNotBlank()) {
+                if (spec.isNotBlank()) {
                     Text(
-                        text = placeYear,
-                        style = MaterialTheme.typography.bodySmall
+                        text = spec,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(2.dp))
 
-                // KM · PS · Getriebe · Kraftstoff
-                val facts = listOfNotNull(
-                    car.km?.let { "${formatNumber(it)} km" },
-                    car.ps?.let { "$it PS" },
-                    car.transmission,
-                    car.fuel
-                ).joinToString(" · ")
-
-                if (facts.isNotBlank()) {
+                // Ort
+                if (!car.location.isNullOrBlank()) {
                     Text(
-                        text = facts,
-                        style = MaterialTheme.typography.bodySmall
+                        text = car.location!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
+
+            Spacer(Modifier.width(8.dp))
+
+            // PREIS RECHTS
+            Text(
+                text = car.priceEur?.let { "€ ${formatNumber(it)}" } ?: "Preis a.A.",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }
